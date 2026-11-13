@@ -1,4 +1,4 @@
-# opencode-plugins
+# opencode-lab
 
 A collection of local TypeScript plugins for **OpenCode v2**. Bun manages dependencies and runs project commands.
 
