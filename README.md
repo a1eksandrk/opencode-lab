@@ -16,6 +16,7 @@ bun install
 plugins/
   <plugin-id>/
     index.ts          # Plugin entrypoint
+    package.json      # npm manifest: makes the plugin installable from git
 .agents/
   skills/             # Local agent skills
 AGENTS.md             # Project instructions for agents
@@ -48,13 +49,21 @@ Run plugin tests:
 bun test
 ```
 
-To load a plugin, add its directory to your project's `opencode.jsonc` (the path is relative to that config file):
+To load a plugin locally, add its directory to your project's `opencode.jsonc` (the path is relative to that config file):
 
 ```jsonc
 {
   "plugins": ["./plugins/my-plugin"]
 }
 ```
+
+To install a plugin from this repository, make sure its directory is a self-contained npm package (has its own `package.json` with `exports` pointing at `index.ts`), commit and push, then use the npm-compatible git specification with a subdirectory selector:
+
+```bash
+opencode plugin add 'github:a1eksandrk/opencode-lab#main::path:plugins/model-whitelist'
+```
+
+`::path:` requires a `package.json` in the target subdirectory. Reference the plugin in config by the same git specification — a bare package name only works after publishing the package to npm.
 
 OpenCode loads the plugins; this project has no standalone application to run. See the [OpenCode v2 plugin documentation](https://dev.opencode.ai/v2/docs/build/plugins/) for the API and loading instructions.
 

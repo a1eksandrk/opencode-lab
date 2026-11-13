@@ -4,6 +4,17 @@ An OpenCode v2 plugin that shows only an allowlist of models for selected
 providers. Providers not listed are left untouched, so you don't have to
 enumerate every model of a provider just to hide a few.
 
+## Install
+
+From git (the directory is a self-contained npm package):
+
+```bash
+opencode plugin add 'github:a1eksandrk/opencode-lab#main::path:plugins/model-whitelist'
+```
+
+Reference the plugin in config by the same git specification; a bare package
+name (`opencode-model-whitelist`) only resolves after publishing to npm.
+
 ## Configuration
 
 Load the plugin directory and pass options via `opencode.jsonc`:
