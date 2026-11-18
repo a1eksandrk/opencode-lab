@@ -15,10 +15,11 @@ selection.
 From git (the directory is a self-contained npm package):
 
 ```bash
-opencode plugin add 'github:a1eksandrk/opencode-lab#main::path:plugins/model-fallback'
+opencode plugin add 'github:a1eksandrk/opencode-lab#model-fallback/v1.0.0::path:plugins/model-fallback'
 ```
 
-Reference the plugin in config by the same git specification; a bare package
+The tag must exist on GitHub before installing. Reference the plugin in config
+by the same git specification; a bare package
 name (`opencode-model-fallback`) only resolves after publishing to npm.
 
 ## Configuration

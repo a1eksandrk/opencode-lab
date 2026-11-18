@@ -9,10 +9,11 @@ enumerate every model of a provider just to hide a few.
 From git (the directory is a self-contained npm package):
 
 ```bash
-opencode plugin add 'github:a1eksandrk/opencode-lab#main::path:plugins/model-whitelist'
+opencode plugin add 'github:a1eksandrk/opencode-lab#model-whitelist/v1.0.0::path:plugins/model-whitelist'
 ```
 
-Reference the plugin in config by the same git specification; a bare package
+The tag must exist on GitHub before installing. Reference the plugin in config
+by the same git specification; a bare package
 name (`opencode-model-whitelist`) only resolves after publishing to npm.
 
 ## Configuration

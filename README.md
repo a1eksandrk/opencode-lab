@@ -71,13 +71,50 @@ To load a plugin locally, add its directory to your project's `opencode.jsonc` (
 }
 ```
 
-To install a plugin from this repository, make sure its directory is a self-contained npm package (has its own `package.json` with `exports` pointing at `index.ts`), commit and push, then use the npm-compatible git specification with a subdirectory selector:
+To install a released plugin, use its tag and the npm-compatible git
+specification with a subdirectory selector:
 
 ```bash
-opencode plugin add 'github:a1eksandrk/opencode-lab#main::path:plugins/model-whitelist'
+opencode plugin add 'github:a1eksandrk/opencode-lab#model-whitelist/v1.0.0::path:plugins/model-whitelist'
 ```
 
-`::path:` requires a `package.json` in the target subdirectory. Reference the plugin in config by the same git specification — a bare package name only works after publishing the package to npm.
+Use `model-fallback/v1.0.0` and `plugins/model-fallback` for the other plugin.
+These examples work once their corresponding tags have been pushed. `::path:`
+requires a `package.json` in the target subdirectory. Reference the plugin in
+config by the same git specification — a bare package name only works after
+publishing the package to npm. Tags can be moved; use a full commit hash instead
+when an immutable Git reference is required.
+
+## Releasing plugins
+
+Each plugin has an independent version in its `package.json` and a tag of the
+form `<plugin-id>/v<major>.<minor>.<patch>`. GitHub Releases share one
+repository-wide list; each tag identifies the plugin it releases. Tags point to
+the entire repository commit, while `::path:` selects the plugin to install.
+
+To release a plugin:
+
+1. Update its `package.json` version, run the checks, and commit the changes.
+2. Push the commit, then create and push the matching tag. For example:
+
+   ```bash
+   git tag model-whitelist/v1.0.0
+   git push origin model-whitelist/v1.0.0
+   ```
+
+3. The release workflow checks that the tag matches the package version, runs
+   typechecking and tests, and creates a GitHub Release. The workflow requires
+   Actions to have permission to write repository contents. If a check fails,
+   rerun it after resolving transient or permission issues. If the tagged code
+   or version needs fixing, commit the fix and use a new version and tag; do not
+   move an already published tag. Edit the release notes on GitHub to add
+   plugin-specific changes.
+
+For the initial releases, create and push both `model-whitelist/v1.0.0` and
+`model-fallback/v1.0.0` after the release workflow and plugin changes have been
+committed and pushed. Later releases can use different versions. The workflow
+accepts stable three-component versions only; it does not publish to npm or
+mark a plugin release as the repository-wide latest release.
 
 OpenCode loads the plugins; this project has no standalone application to run. See the [OpenCode v2 plugin documentation](https://dev.opencode.ai/v2/docs/build/plugins/) for the API and loading instructions.
 
