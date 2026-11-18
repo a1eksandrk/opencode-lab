@@ -368,7 +368,7 @@ describe("model-fallback plugin", () => {
     await fake.cleanup?.();
   });
 
-  test("reports a lifecycle subscription failure", async () => {
+  test("disables routing after a lifecycle subscription failure", async () => {
     const warn = spyOn(console, "warn").mockImplementation(() => {});
 
     try {
@@ -383,11 +383,59 @@ describe("model-fallback plugin", () => {
         ),
       ).toBe(true);
 
+      const retry = retryEvent({ providerID: "p", id: "a", variant: "default" });
+      await invoke(fake.hooks, "retry", retry);
+      expect(fake.switches).toEqual([]);
+      expect(retry.decision).toEqual({ retry: true, delay: 10 });
+
       await fake.cleanup?.();
     } finally {
       warn.mockRestore();
     }
   });
+
+  for (const outcome of ["failure", "completion"] as const) {
+    test(`a lifecycle subscription ${outcome} cancels pending and future retries`, async () => {
+      const warn = spyOn(console, "warn").mockImplementation(() => {});
+      const streamGate = deferred();
+      const inventoryGate = deferred();
+      const lookupEntered = deferred();
+      async function* events(): AsyncGenerator<unknown> {
+        await streamGate.promise;
+        if (outcome === "failure") throw new Error("stream failed");
+      }
+
+      try {
+        const fake = await setupWithFallback(undefined, {
+          eventSource: events(),
+          listModelsGate: inventoryGate.promise,
+          onListModels: () => lookupEntered.resolve(),
+        });
+        const retry = retryEvent({ providerID: "p", id: "a", variant: "default" });
+        const pending = invoke(fake.hooks, "retry", retry);
+        await lookupEntered.promise;
+
+        streamGate.resolve();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(fake.signals.some((signal) => signal.aborted)).toBe(true);
+        expect(warn.mock.calls.some(([message]) =>
+          String(message).includes("fallback routing disabled"),
+        )).toBe(true);
+
+        inventoryGate.resolve();
+        await pending;
+        const lateRetry = retryEvent({ providerID: "p", id: "a", variant: "default" });
+        await invoke(fake.hooks, "retry", lateRetry);
+
+        expect(fake.switches).toEqual([]);
+        expect(retry.decision).toEqual({ retry: true, delay: 10 });
+        expect(lateRetry.decision).toEqual({ retry: true, delay: 10 });
+        await fake.cleanup?.();
+      } finally {
+        warn.mockRestore();
+      }
+    });
+  }
 
   test("invalidates a pending lookup before waiting for unload cleanup", async () => {
     const inventoryGate = deferred();
@@ -463,6 +511,7 @@ describe("model-fallback plugin", () => {
   });
 
   test("disposes retry hooks and stops the lifecycle subscription on unload", async () => {
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
     const fake = await setupWithFallback();
 
     expect([...fake.hooks.keys()]).toEqual(["retry"]);
@@ -470,5 +519,7 @@ describe("model-fallback plugin", () => {
     await fake.cleanup?.();
 
     expect(fake.disposed).toEqual(["retry"]);
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
   });
 });

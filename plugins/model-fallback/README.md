@@ -99,6 +99,9 @@ Load the plugin directory and pass an ordered fallback list per source model:
   the plugin does not roll it back.
 - Routing state is in memory, bounded, and dropped on session deletion and
   plugin unload. A reload does not restore a chain or change a stored model.
+- If the lifecycle event subscription ends unexpectedly or fails, the plugin
+  cancels pending decisions, clears routing state, and disables fallback until
+  the plugin is reloaded. Native retry decisions remain unchanged.
 
 ## Limits
 
@@ -174,7 +177,7 @@ bun pm pack --dry-run
 PACK_DIR=$(mktemp -d)
 bun pm pack --destination "$PACK_DIR"
 cd ../..
-tar -xzf "$PACK_DIR/opencode-model-fallback-1.0.0.tgz" -C "$PACK_DIR"
+tar -xzf "$PACK_DIR/opencode-model-fallback-1.0.1.tgz" -C "$PACK_DIR"
 MODEL_FALLBACK_PLUGIN_DIR="$PACK_DIR/package" \
   bun run plugins/model-fallback/e2e/run.ts core
 rm -rf "$PACK_DIR"

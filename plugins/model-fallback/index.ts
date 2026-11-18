@@ -48,6 +48,7 @@ export default Plugin.define({
       {
         forget: (sessionID) => router.forgetSession(sessionID),
         interrupt: (sessionID) => router.interruptSession(sessionID),
+        close: () => router.close(),
       },
       controller.signal,
     );
@@ -93,6 +94,7 @@ function runtimeFrom(ctx: Plugin.Context): FallbackRuntime {
 interface LifecycleHandlers {
   readonly forget: (sessionID: string) => void;
   readonly interrupt: (sessionID: string) => void;
+  readonly close: () => void;
 }
 
 async function watchLifecycle(
@@ -108,11 +110,16 @@ async function watchLifecycle(
       if (action.type === "forget") handlers.forget(action.sessionID);
       else handlers.interrupt(action.sessionID);
     }
+    if (signal.aborted) return;
+
+    handlers.close();
+    warn("event subscription stopped; fallback routing disabled");
   } catch (error) {
     if (signal.aborted) return;
 
+    handlers.close();
     warn(
-      `event subscription stopped: ${error instanceof Error ? error.name : "unknown error"}`,
+      `event subscription stopped: ${error instanceof Error ? error.name : "unknown error"}; fallback routing disabled`,
     );
   }
 }
