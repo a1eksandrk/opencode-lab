@@ -2,6 +2,13 @@
 
 A collection of local TypeScript plugins for **OpenCode v2**. Bun manages dependencies and runs project commands.
 
+## Plugins
+
+| Plugin | Purpose |
+| --- | --- |
+| [model-fallback](plugins/model-fallback/README.md) | Retries a rate-limited subagent step on another configured model in the same child session. |
+| [model-whitelist](plugins/model-whitelist/README.md) | Shows only an allowlist of models for selected providers. |
+
 ## Setup
 
 Install [Bun](https://bun.com), then install the project dependencies:
@@ -17,6 +24,8 @@ plugins/
   <plugin-id>/
     index.ts          # Plugin entrypoint
     package.json      # npm manifest: makes the plugin installable from git
+    *.test.ts         # Unit and plugin-boundary tests next to the modules
+    e2e/              # Opt-in integration fixtures and runner, when present
 .agents/
   skills/             # Local agent skills
 AGENTS.md             # Project instructions for agents
@@ -43,11 +52,16 @@ Run the type check:
 bun run typecheck
 ```
 
-Run plugin tests:
+Run plugin unit tests (colocated with the modules they cover):
 
 ```bash
 bun test
 ```
+
+The `model-fallback` integration suite requires OpenCode `2.3.2` on `PATH` and
+runs directly with Bun. See its
+[verification section](plugins/model-fallback/README.md#verification) for the
+command, scope, and versions tested.
 
 To load a plugin locally, add its directory to your project's `opencode.jsonc` (the path is relative to that config file):
 

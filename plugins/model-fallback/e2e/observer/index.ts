@@ -1,0 +1,153 @@
+import { Plugin } from "@opencode/plugin";
+
+type Json = Record<string, unknown>;
+
+function endpointOf(options: Readonly<Record<string, unknown>>): string {
+  const endpoint = options.endpoint;
+  if (typeof endpoint !== "string" || endpoint.length === 0) {
+    throw new Error("e2e observer: missing endpoint option");
+  }
+  return endpoint;
+}
+
+function providerScope(options: Readonly<Record<string, unknown>>): string[] | undefined {
+  const providers = options.providers;
+  if (!Array.isArray(providers)) return undefined;
+
+  return providers.filter((provider): provider is string => typeof provider === "string");
+}
+
+function isRecord(value: unknown): value is Json {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Passive observer for the integration suite. It records session context,
+ * HTTP statuses, retries, and tool completions; it never changes a retry
+ * decision, model, or request.
+ */
+export default Plugin.define({
+  id: "model-fallback-e2e-observer",
+
+  async setup(ctx) {
+    const endpoint = endpointOf(ctx.options);
+    const requestIDs = new WeakMap<object, number>();
+    let nextRequestID = 0;
+
+    const requestID = (request: object): number => {
+      const existing = requestIDs.get(request);
+      if (existing !== undefined) return existing;
+
+      nextRequestID += 1;
+      requestIDs.set(request, nextRequestID);
+      return nextRequestID;
+    };
+
+    const log = (event: string, data: Json = {}) =>
+      fetch(endpoint, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ event, at: new Date().toISOString(), ...data }),
+      }).catch(() => {});
+
+    const registrations = [ctx.session.hook("context", async (event) => {
+      let parentID: string | undefined;
+      let sessionModel: unknown;
+      try {
+        const session = await ctx.session.get({ sessionID: event.sessionID });
+        parentID = session.parentID;
+        sessionModel = session.model;
+      } catch {
+        // The context entry is still useful without the session lookup.
+      }
+
+      await log("context", {
+        sessionID: event.sessionID,
+        agent: event.agent,
+        model: event.model,
+        parentID,
+        sessionModel,
+      });
+    })];
+
+    const onHttpRequest = async (event: {
+      sessionID: string;
+      agent: string;
+      model: unknown;
+      kind: string;
+      request: Request;
+    }) => {
+      await log("http.request", {
+        sessionID: event.sessionID,
+        agent: event.agent,
+        model: event.model,
+        kind: event.kind,
+        requestID: requestID(event.request),
+        url: event.request.url,
+      });
+    };
+
+    const onHttpResponse = async (event: {
+      sessionID: string;
+      agent: string;
+      model: unknown;
+      kind: string;
+      request: Request;
+      response: Response;
+    }) => {
+      await log("http.response", {
+        sessionID: event.sessionID,
+        agent: event.agent,
+        model: event.model,
+        kind: event.kind,
+        requestID: requestID(event.request),
+        url: event.request.url,
+        status: event.response.status,
+      });
+    };
+
+    const scopes: Array<string | undefined> = providerScope(ctx.options) ?? [undefined];
+    for (const providerID of scopes) {
+      const options = providerID ? { providerID } : undefined;
+      registrations.push(ctx.session.hook("http.request", onHttpRequest, options));
+      registrations.push(ctx.session.hook("http.response", onHttpResponse, options));
+    }
+
+    registrations.push(ctx.session.hook("retry", async (event) => {
+      await log("retry", {
+        sessionID: event.sessionID,
+        agent: event.agent,
+        model: event.model,
+        status: event.error.status,
+        errorType: event.error.type,
+        attempt: event.attempt,
+      });
+    }));
+
+    registrations.push(ctx.tool.hook("execute.after", async (event) => {
+      if (event.tool !== "read" && event.tool !== "subagent") return;
+
+      await log("tool.after", {
+        sessionID: event.sessionID,
+        agent: event.agent,
+        tool: event.tool,
+        id: event.id,
+        status: event.status,
+      });
+    }));
+
+    const results = await Promise.allSettled(registrations);
+    const active = results.flatMap((result) =>
+      result.status === "fulfilled" ? [result.value] : [],
+    );
+    const failed = results.find((result) => result.status === "rejected");
+    if (failed) {
+      await Promise.allSettled(active.map((registration) => registration.dispose()));
+      throw failed.reason;
+    }
+
+    return async () => {
+      await Promise.all(active.map((registration) => registration.dispose()));
+    };
+  },
+});

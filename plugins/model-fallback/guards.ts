@@ -1,0 +1,10 @@
+export type UnknownRecord = Record<string, unknown>;
+
+/** Narrow `unknown` data received from the host without trusting its shape. */
+export function isRecord(value: unknown): value is UnknownRecord {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
