@@ -1,13 +1,18 @@
+import { Model } from "@opencode/plugin";
 import { isRecord } from "./guards.ts";
+
+export interface ModelRef {
+  readonly providerID: string;
+  readonly id: string;
+  readonly variant?: string;
+}
 
 export interface SourceModel {
   readonly providerID: string;
   readonly id: string;
 }
 
-export interface ModelTarget extends SourceModel {
-  readonly variant?: string;
-}
+export type ModelTarget = ModelRef;
 
 export interface FallbackConfig {
   /** Ordered targets keyed by `provider/model` of the original source. */
@@ -28,10 +33,6 @@ export function targetKey(target: ModelTarget): string {
   return target.variant === undefined
     ? sourceKey(target)
     : `${sourceKey(target)}#${target.variant}`;
-}
-
-export function formatTarget(target: ModelTarget): string {
-  return targetKey(target);
 }
 
 /**
@@ -70,8 +71,8 @@ export function parseFallbackConfig(options: unknown): FallbackConfig {
 }
 
 function parseSourceEntry(key: string, diagnostics: string[]): SourceModel | undefined {
-  const source = parseSource(key);
-  if (source) return source;
+  const source = parseModel(key);
+  if (source && source.variant === undefined) return source;
 
   diagnostics.push(
     `fallback key ${JSON.stringify(key)} is not a valid source model: expected "provider/model" without a variant`,
@@ -96,7 +97,7 @@ function parseTargets(
       return;
     }
 
-    const target = parseTarget(entry);
+    const target = parseModel(entry);
     if (!target) {
       diagnostics.push(
         `fallback[${JSON.stringify(key)}][${index}] is not a valid target: expected "provider/model[#variant]"`,
@@ -117,31 +118,12 @@ function parseTargets(
 }
 
 /** Split at the first `/` so model IDs may contain slashes. */
-function parseSource(value: string): SourceModel | undefined {
-  if (value.includes("#")) return undefined;
-
-  const separator = value.indexOf("/");
-  if (separator <= 0 || separator === value.length - 1) return undefined;
-
-  return {
-    providerID: value.slice(0, separator),
-    id: value.slice(separator + 1),
-  };
-}
-
-function parseTarget(value: string): ModelTarget | undefined {
-  if (value.length === 0) return undefined;
-
-  const separator = value.indexOf("#");
-  if (separator === -1) return parseSource(value);
-
-  if (value.indexOf("#", separator + 1) !== -1) return undefined;
-
-  const variant = value.slice(separator + 1);
-  if (variant.length === 0) return undefined;
-
-  const source = parseSource(value.slice(0, separator));
-  return source ? { ...source, variant } : undefined;
+function parseModel(value: string): ModelTarget | undefined {
+  try {
+    return Model.Ref.parse(value);
+  } catch {
+    return undefined;
+  }
 }
 
 function isSelfTarget(source: SourceModel, target: ModelTarget): boolean {

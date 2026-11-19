@@ -31,18 +31,6 @@ export default Plugin.define({
 
   async setup(ctx) {
     const endpoint = endpointOf(ctx.options);
-    const requestIDs = new WeakMap<object, number>();
-    let nextRequestID = 0;
-
-    const requestID = (request: object): number => {
-      const existing = requestIDs.get(request);
-      if (existing !== undefined) return existing;
-
-      nextRequestID += 1;
-      requestIDs.set(request, nextRequestID);
-      return nextRequestID;
-    };
-
     const log = (event: string, data: Json = {}) =>
       fetch(endpoint, {
         method: "POST",
@@ -52,11 +40,9 @@ export default Plugin.define({
 
     const registrations = [ctx.session.hook("context", async (event) => {
       let parentID: string | undefined;
-      let sessionModel: unknown;
       try {
         const session = await ctx.session.get({ sessionID: event.sessionID });
         parentID = session.parentID;
-        sessionModel = session.model;
       } catch {
         // The context entry is still useful without the session lookup.
       }
@@ -64,9 +50,7 @@ export default Plugin.define({
       await log("context", {
         sessionID: event.sessionID,
         agent: event.agent,
-        model: event.model,
         parentID,
-        sessionModel,
       });
     })];
 
@@ -75,34 +59,12 @@ export default Plugin.define({
       agent: string;
       model: unknown;
       kind: string;
-      request: Request;
     }) => {
       await log("http.request", {
         sessionID: event.sessionID,
         agent: event.agent,
         model: event.model,
         kind: event.kind,
-        requestID: requestID(event.request),
-        url: event.request.url,
-      });
-    };
-
-    const onHttpResponse = async (event: {
-      sessionID: string;
-      agent: string;
-      model: unknown;
-      kind: string;
-      request: Request;
-      response: Response;
-    }) => {
-      await log("http.response", {
-        sessionID: event.sessionID,
-        agent: event.agent,
-        model: event.model,
-        kind: event.kind,
-        requestID: requestID(event.request),
-        url: event.request.url,
-        status: event.response.status,
       });
     };
 
@@ -110,7 +72,6 @@ export default Plugin.define({
     for (const providerID of scopes) {
       const options = providerID ? { providerID } : undefined;
       registrations.push(ctx.session.hook("http.request", onHttpRequest, options));
-      registrations.push(ctx.session.hook("http.response", onHttpResponse, options));
     }
 
     registrations.push(ctx.session.hook("retry", async (event) => {
@@ -119,8 +80,6 @@ export default Plugin.define({
         agent: event.agent,
         model: event.model,
         status: event.error.status,
-        errorType: event.error.type,
-        attempt: event.attempt,
       });
     }));
 
@@ -131,8 +90,6 @@ export default Plugin.define({
         sessionID: event.sessionID,
         agent: event.agent,
         tool: event.tool,
-        id: event.id,
-        status: event.status,
       });
     }));
 

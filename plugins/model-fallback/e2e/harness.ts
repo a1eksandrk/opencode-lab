@@ -12,11 +12,46 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 export const PLUGIN_DIR =
   process.env.MODEL_FALLBACK_PLUGIN_DIR ?? resolve(HERE, "..");
 const OBSERVER_DIR = join(HERE, "observer");
+const GUARD_DIR = join(HERE, "fixture-guard");
 const REQUIRED_RUNTIME = "2.3.2";
 const TIMEOUT_MS = 60_000;
 const TASK =
   "Start the explore subagent to read marker.txt and report the exact marker.";
 const MOCK_PROVIDERS = ["free", "paid", "backup", "native"] as const;
+
+type MockProvider = (typeof MOCK_PROVIDERS)[number];
+
+interface ModelFixture {
+  readonly name: string;
+  readonly limit: { readonly context: number; readonly output: number };
+  readonly variants?: readonly {
+    readonly id: string;
+    readonly headers: Record<string, string>;
+  }[];
+}
+
+interface ProviderFixture {
+  readonly name: string;
+  readonly package: string;
+  readonly settings: {
+    readonly baseURL: string;
+    readonly apiKey: string;
+    readonly timeout: number;
+  };
+  readonly models: Record<string, ModelFixture>;
+}
+
+interface AgentFixture {
+  readonly description: string;
+  readonly mode: "primary" | "subagent" | "all";
+  readonly model: string;
+  readonly system: string;
+  readonly permissions: readonly {
+    readonly action: string;
+    readonly resource: string;
+    readonly effect: "allow" | "deny" | "ask";
+  }[];
+}
 
 export interface RunResult {
   readonly scenario: Scenario;
@@ -40,28 +75,33 @@ export async function runScenario(
 
   try {
     const workspace = join(root, "workspace");
+    const home = join(root, "home");
+    const tmp = join(root, "tmp");
     const configDir = join(root, "config");
     const dataDir = join(root, "data");
     const cacheDir = join(root, "cache");
     const stateDir = join(root, "state");
     await Promise.all(
-      [workspace, configDir, dataDir, cacheDir, stateDir].map((dir) =>
-        mkdir(dir, { recursive: true }),
+      [workspace, home, tmp, configDir, dataDir, cacheDir, stateDir].map(
+        (dir) => mkdir(dir, { recursive: true }),
       ),
     );
     await writeFile(join(workspace, "marker.txt"), `${marker}\n`, "utf8");
 
     const mock = startMock(scenario, marker);
     try {
+      const config = configFor(scenario, mock.url);
       await writeFile(
         join(workspace, "opencode.jsonc"),
-        configFor(scenario, mock.url),
+        JSON.stringify(config, null, 2),
         "utf8",
       );
 
       const result = await spawnRun({
         opencode,
         workspace,
+        home,
+        tmp,
         configDir,
         dataDir,
         cacheDir,
@@ -115,6 +155,8 @@ function requireOpenCode(): string {
 interface SpawnOptions {
   readonly opencode: string;
   readonly workspace: string;
+  readonly home: string;
+  readonly tmp: string;
   readonly configDir: string;
   readonly dataDir: string;
   readonly cacheDir: string;
@@ -168,54 +210,74 @@ async function spawnRun(options: SpawnOptions): Promise<{
 
 function isolatedEnv(options: SpawnOptions): Record<string, string> {
   const env: Record<string, string> = {};
-  for (const key of ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "SHELL"]) {
+  for (const key of ["PATH", "LANG", "LC_ALL", "SHELL"]) {
     const value = process.env[key];
     if (value) env[key] = value;
   }
 
   return {
     ...env,
+    // Never inherit the real HOME, OpenCode config, data, or credentials.
+    HOME: options.home,
+    TMPDIR: options.tmp,
     OPENCODE_CONFIG_DIR: options.configDir,
+    XDG_CONFIG_HOME: options.configDir,
     XDG_DATA_HOME: options.dataDir,
     XDG_CACHE_HOME: options.cacheDir,
     XDG_STATE_HOME: options.stateDir,
     OPENCODE_DISABLE_AUTOUPDATE: "1",
+    OPENCODE_DISABLE_MODELS_FETCH: "1",
+    OPENCODE_DISABLE_FREE_MODELS: "1",
     NO_COLOR: "1",
   };
 }
 
-function configFor(scenario: Scenario, mockURL: string): string {
-  return JSON.stringify(
-    {
-      $schema: "https://opencode.ai/config.json",
-      model: "free/parent",
-      providers: providers(mockURL),
-      agents: agents(),
-      plugins: [
-        {
-          package: PLUGIN_DIR,
-          options: { fallback: fallbackFor(scenario) },
+function configFor(scenario: Scenario, mockURL: string) {
+  const mockBase = loopbackBase(mockURL);
+
+  return {
+    $schema: "https://opencode.ai/config.json",
+    model: "free/parent",
+    providers: providers(mockBase),
+    agents: agents(),
+    plugins: [
+      {
+        package: PLUGIN_DIR,
+        options: { fallback: fallbackFor(scenario) },
+      },
+      {
+        package: OBSERVER_DIR,
+        options: {
+          endpoint: `${mockBase}/__observer`,
+          providers: MOCK_PROVIDERS,
         },
-        {
-          package: OBSERVER_DIR,
-          options: {
-            endpoint: `${mockURL}/__observer`,
-            providers: MOCK_PROVIDERS,
-          },
-        },
-      ],
-    },
-    null,
-    2,
-  );
+      },
+      {
+        package: GUARD_DIR,
+        options: { providers: MOCK_PROVIDERS },
+      },
+    ],
+  };
 }
 
-function providers(mockURL: string): Record<string, unknown> {
-  const openAi = (path: string, name: string) => ({
+/** Validate the mock once; every provider URL is derived from this origin. */
+function loopbackBase(mockURL: string): string {
+  const url = new URL(mockURL);
+  if (url.protocol !== "http:" || url.hostname !== "127.0.0.1") {
+    throw new Error(`e2e mock endpoint is not loopback HTTP: ${mockURL}`);
+  }
+  return url.origin;
+}
+
+function providers(mockBase: string): Record<MockProvider, ProviderFixture> {
+  const openAi = (
+    path: Exclude<MockProvider, "native">,
+    name: string,
+  ): ProviderFixture => ({
     name,
     package: "@opencode/ai/providers/openai-compatible",
     settings: {
-      baseURL: `${mockURL}/${path}/v1`,
+      baseURL: `${mockBase}/${path}/v1`,
       apiKey: `e2e-${path}-key`,
       timeout: 20_000,
     },
@@ -233,7 +295,7 @@ function providers(mockURL: string): Record<string, unknown> {
       name: "E2E Native Anthropic",
       package: "@opencode/ai/providers/anthropic",
       settings: {
-        baseURL: `${mockURL}/anthropic/v1`,
+        baseURL: `${mockBase}/anthropic/v1`,
         apiKey: "e2e-anthropic-key",
         timeout: 20_000,
       },
@@ -253,7 +315,7 @@ function providers(mockURL: string): Record<string, unknown> {
   };
 }
 
-function agents(): Record<string, unknown> {
+function agents(): Record<string, AgentFixture> {
   return {
     "e2e-parent": {
       description: "Integration test parent orchestrator",

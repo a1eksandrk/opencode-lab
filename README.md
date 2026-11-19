@@ -78,7 +78,7 @@ specification with a subdirectory selector:
 opencode plugin add 'github:a1eksandrk/opencode-lab#model-whitelist/v1.0.0::path:plugins/model-whitelist'
 ```
 
-Use `model-fallback/v1.0.0` and `plugins/model-fallback` for the other plugin.
+Use `model-fallback/v1.0.2` and `plugins/model-fallback` for the other plugin.
 These examples work once their corresponding tags have been pushed. `::path:`
 requires a `package.json` in the target subdirectory. Reference the plugin in
 config by the same git specification — a bare package name only works after

@@ -1,5 +1,6 @@
 import {
   sourceKey,
+  type ModelRef,
   type ModelTarget,
   type SourceModel,
 } from "./config.ts";
@@ -33,29 +34,34 @@ export interface FallbackChain {
   cursor: number;
   readonly reported: Set<string>;
   exhausted?: boolean;
-}
-
-export interface RuntimeModelRef {
-  readonly providerID: string;
-  readonly id: string;
-  readonly variant?: string;
+  /**
+   * A switch the host accepted but whose selection could not be read back.
+   * The next successful session read reconciles it against the real selection.
+   */
+  unconfirmed?: {
+    readonly target: ModelTarget;
+    readonly index: number;
+  };
 }
 
 /** True for the same provider and model ID; variants are intentionally ignored. */
-export function sameModel(a: RuntimeModelRef, b: RuntimeModelRef): boolean {
+export function sameModel(a: ModelRef, b: ModelRef): boolean {
   return a.providerID === b.providerID && a.id === b.id;
 }
 
 /** True for the same provider, model ID, and variant. A bare variant means the default. */
-export function sameSelection(a: RuntimeModelRef, b: RuntimeModelRef): boolean {
+export function sameSelection(a: ModelRef, b: ModelRef): boolean {
   return sameModel(a, b) && normalizeVariant(a.variant) === normalizeVariant(b.variant);
 }
 
 /**
- * A chain owns the selected model only while the child is still on the source
- * or on the target recorded by a successful switch.
+ * A chain owns the selected model while the child is still on the source, on
+ * the confirmed target, or on a target whose confirmation is pending.
  */
-export function chainOwns(chain: FallbackChain, selected: RuntimeModelRef): boolean {
+export function chainOwns(chain: FallbackChain, selected: ModelRef): boolean {
+  if (chain.unconfirmed && sameSelection(chain.unconfirmed.target, selected)) {
+    return true;
+  }
   if (chain.current) return sameSelection(chain.current, selected);
 
   return sameModel(chain.source, selected);
@@ -100,12 +106,6 @@ export function selectCandidate(
   }
 
   return { skipped };
-}
-
-export function toModelRef(target: ModelTarget): RuntimeModelRef {
-  return target.variant === undefined
-    ? { providerID: target.providerID, id: target.id }
-    : { providerID: target.providerID, id: target.id, variant: target.variant };
 }
 
 export function describeSkip(reason: SkipReason): string {

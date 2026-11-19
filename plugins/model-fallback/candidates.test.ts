@@ -4,7 +4,6 @@ import {
   createChain,
   describeSkip,
   selectCandidate,
-  toModelRef,
   type InventoryModel,
 } from "./candidates";
 import type { ModelTarget } from "./config";
@@ -140,20 +139,6 @@ describe("fallback chain ownership", () => {
     chain.current = B;
 
     expect(chainOwns(chain, { providerID: "p", id: "a" })).toBe(false);
-  });
-});
-
-describe("toModelRef", () => {
-  test("omits the variant for a bare target", () => {
-    expect(toModelRef(B)).toEqual({ providerID: "p", id: "b" });
-  });
-
-  test("keeps an explicit target variant", () => {
-    expect(toModelRef({ ...B, variant: "high" })).toEqual({
-      providerID: "p",
-      id: "b",
-      variant: "high",
-    });
   });
 });
 

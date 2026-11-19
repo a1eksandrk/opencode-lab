@@ -5,23 +5,21 @@ import {
   describeSkip,
   selectCandidate,
   sameSelection,
-  toModelRef,
   type FallbackChain,
   type CandidateSkip,
   type InventoryModel,
-  type RuntimeModelRef,
 } from "./candidates.ts";
 import {
-  formatTarget,
   sourceKey,
   targetKey,
   type FallbackConfig,
+  type ModelRef,
   type ModelTarget,
 } from "./config.ts";
 
 export interface FallbackSessionInfo {
   readonly parentID?: string;
-  readonly model?: RuntimeModelRef;
+  readonly model?: ModelRef;
 }
 
 export interface FallbackRuntime {
@@ -31,7 +29,7 @@ export interface FallbackRuntime {
   ): Promise<FallbackSessionInfo>;
   switchModel(
     sessionID: string,
-    model: RuntimeModelRef,
+    model: ModelRef,
     signal?: AbortSignal,
   ): Promise<void>;
   listModels(signal?: AbortSignal): Promise<readonly InventoryModel[]>;
@@ -39,7 +37,7 @@ export interface FallbackRuntime {
 
 export interface FallbackRetryEvent {
   readonly sessionID: string;
-  readonly model: RuntimeModelRef;
+  readonly model: ModelRef;
   readonly errorStatus: number | undefined;
 }
 
@@ -55,6 +53,11 @@ export interface FallbackRouterOptions {
 
 interface Operation {
   readonly controller: AbortController;
+  /**
+   * A dispatched switch keeps the operation slot until its promise settles,
+   * even after cancellation: OpenCode 2.3.2 may still apply that RPC.
+   */
+  phase: "routing" | "switching";
 }
 
 /** Bound retained routing state; new sessions fail closed when it is full. */
@@ -85,7 +88,16 @@ export class FallbackRouter {
   ): Promise<RetryDecision | undefined> {
     if (this.closed) return undefined;
     if (event.errorStatus !== 429) return undefined;
-    if (this.operations.has(event.sessionID)) return undefined;
+
+    const existing = this.operations.get(event.sessionID);
+    if (existing) {
+      if (existing.phase === "switching") {
+        this.warn(
+          `an earlier switch is still settling for session ${event.sessionID}; leaving retry policy unchanged`,
+        );
+      }
+      return undefined;
+    }
 
     const operation = this.beginOperation(event.sessionID);
     if (!operation) return undefined;
@@ -118,6 +130,14 @@ export class FallbackRouter {
     if (this.closed) return;
 
     this.invalidateOperation(sessionID);
+
+    // An interruption preserves a confirmed chain but drops an unconfirmed
+    // target that never demonstrably took over.
+    const chain = this.chains.get(sessionID);
+    if (!chain) return;
+
+    if (chain.current) chain.unconfirmed = undefined;
+    else this.chains.delete(sessionID);
   }
 
   /**
@@ -153,6 +173,10 @@ export class FallbackRouter {
 
     const chain = this.chainFor(event.sessionID, session.model);
     if (!chain) return undefined;
+
+    // A confirmed child whose cursor reached the end owns the terminal stop.
+    // It does not need the current inventory to veto another native retry.
+    if (chain.cursor >= chain.targets.length) return this.exhausted(chain);
 
     const inventory = await this.readInventory(signal);
     if (!this.isCurrent(event.sessionID, operation)) return undefined;
@@ -198,19 +222,22 @@ export class FallbackRouter {
     index: number,
     operation: Operation,
   ): Promise<RetryDecision | undefined> {
+    operation.phase = "switching";
     try {
       await this.options.runtime.switchModel(
         sessionID,
-        toModelRef(target),
+        target,
         operation.controller.signal,
       );
     } catch (error) {
       if (!operation.controller.signal.aborted) {
         this.warn(
-          `fallback switch to ${formatTarget(target)} failed for session ${sessionID}: ${describeError(error)}`,
+          `fallback switch to ${targetKey(target)} failed for session ${sessionID}: ${describeError(error)}`,
         );
       }
       return undefined;
+    } finally {
+      operation.phase = "routing";
     }
 
     // The switch may already be committed by the host. Do not update ownership
@@ -226,16 +253,27 @@ export class FallbackRouter {
     );
     if (!this.isCurrent(sessionID, operation)) return undefined;
 
-    const intended = toModelRef(target);
-    if (!current?.model || !sameSelection(current.model, intended)) {
+    if (!current) {
+      // OpenCode 2.3.2 can accept the switch RPC and then fail the follow-up
+      // read. Do not trust the missing result or discard the original chain;
+      // the next successful read will reconcile the target before advancing.
+      chain.unconfirmed = { target, index };
       this.warn(
-        `fallback switch to ${formatTarget(target)} was superseded for session ${sessionID}; leaving retry policy unchanged`,
+        `fallback switch to ${targetKey(target)} could not be confirmed for session ${sessionID}; deferring reconciliation to the next retry`,
+      );
+      return undefined;
+    }
+
+    if (!current.model || !sameSelection(current.model, target)) {
+      this.warn(
+        `fallback switch to ${targetKey(target)} was superseded for session ${sessionID}; leaving retry policy unchanged`,
       );
       return undefined;
     }
 
     chain.current = target;
     chain.cursor = index + 1;
+    chain.unconfirmed = undefined;
 
     return { retry: true, delay: 0 };
   }
@@ -248,7 +286,10 @@ export class FallbackRouter {
       return undefined;
     }
 
-    const operation: Operation = { controller: new AbortController() };
+    const operation: Operation = {
+      controller: new AbortController(),
+      phase: "routing",
+    };
     this.operations.set(sessionID, operation);
     return operation;
   }
@@ -259,19 +300,28 @@ export class FallbackRouter {
     this.operations.delete(sessionID);
 
     // A chain that never took over owns nothing. Recreate it on the next
-    // attempt instead of retaining state for every rate-limited child.
+    // attempt instead of retaining state for every rate-limited child. A
+    // successful switch whose confirmation read failed is kept for one safe
+    // reconciliation on the next retry.
     const chain = this.chains.get(sessionID);
-    if (chain && !chain.current) this.chains.delete(sessionID);
+    if (chain && !chain.current && !chain.unconfirmed) {
+      this.chains.delete(sessionID);
+    }
   }
 
   private invalidateOperation(sessionID: string): void {
     const operation = this.operations.get(sessionID);
     if (!operation) return;
 
+    operation.controller.abort();
+
+    // A cancelled lookup cannot affect the host. A cancelled switch may still
+    // be applied, so it keeps its slot until the promise settles.
+    if (operation.phase === "switching") return;
+
     this.operations.delete(sessionID);
     const chain = this.chains.get(sessionID);
     if (chain && !chain.current) this.chains.delete(sessionID);
-    operation.controller.abort();
   }
 
   private isCurrent(sessionID: string, operation: Operation): boolean {
@@ -281,13 +331,40 @@ export class FallbackRouter {
     );
   }
 
+  /**
+   * Match a stored chain against the newly read selection. An unconfirmed
+   * switch is claimed only when the child is actually on that exact target;
+   * any owned selection clears it, and any other selection is a manual change.
+   */
+  private reconcileChain(
+    chain: FallbackChain,
+    selected: ModelRef,
+  ): FallbackChain | undefined {
+    const unconfirmed = chain.unconfirmed;
+    if (unconfirmed && sameSelection(unconfirmed.target, selected)) {
+      chain.current = unconfirmed.target;
+      chain.cursor = unconfirmed.index + 1;
+      chain.unconfirmed = undefined;
+      return chain;
+    }
+
+    if (!chainOwns(chain, selected)) return undefined;
+
+    chain.unconfirmed = undefined;
+    return chain;
+  }
+
   private chainFor(
     sessionID: string,
-    selected: RuntimeModelRef,
+    selected: ModelRef,
   ): FallbackChain | undefined {
     const existing = this.chains.get(sessionID);
-    if (existing && chainOwns(existing, selected)) return existing;
-    if (existing) this.discardChain(sessionID, "the selected model changed");
+    if (existing) {
+      const reconciled = this.reconcileChain(existing, selected);
+      if (reconciled) return reconciled;
+
+      this.discardChain(sessionID, "the selected model changed");
+    }
 
     const targets = this.options.config.targetsBySource.get(sourceKey(selected));
     if (!targets) return undefined;
@@ -330,7 +407,7 @@ export class FallbackRouter {
 
       chain.reported.add(key);
       this.warn(
-        `skipping fallback target ${formatTarget(target)} for ${chainLabel(chain)}: ${describeSkip(reason)}`,
+        `skipping fallback target ${targetKey(target)} for ${chainLabel(chain)}: ${describeSkip(reason)}`,
       );
     }
   }
@@ -374,7 +451,7 @@ export class FallbackRouter {
 
   private discardUnownedSelection(
     sessionID: string,
-    selected: RuntimeModelRef | undefined,
+    selected: ModelRef | undefined,
   ): void {
     const chain = this.chains.get(sessionID);
     if (selected && chain && !chainOwns(chain, selected)) {

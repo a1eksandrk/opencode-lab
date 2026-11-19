@@ -15,7 +15,7 @@ selection.
 From git (the directory is a self-contained npm package):
 
 ```bash
-opencode plugin add 'github:a1eksandrk/opencode-lab#model-fallback/v1.0.0::path:plugins/model-fallback'
+opencode plugin add 'github:a1eksandrk/opencode-lab#model-fallback/v1.0.2::path:plugins/model-fallback'
 ```
 
 The tag must exist on GitHub before installing. Reference the plugin in config
@@ -73,6 +73,11 @@ Load the plugin directory and pass an ordered fallback list per source model:
   `{ retry: true, delay: 0 }`. The next request retries the step in the same
   child with its existing history and tool results. The plugin never calls
   `session.prompt`, creates a child, proxies requests, or rewrites messages.
+- If the switch RPC succeeds but the follow-up session read fails, the plugin
+  does not trust the missing result or discard the original chain. It records
+  the intended target as unconfirmed; the next successful retry reconciles that
+  target against the child's actual selection before advancing. A different
+  selection still counts as a manual change and discards the chain.
 - The chain is built only from the original source's ordered list. A target's
   own mapping is never expanded. The cursor advances only after a confirmed
   switch, so an entry skipped before a takeover is not reconsidered and the
@@ -83,8 +88,10 @@ Load the plugin directory and pass an ordered fallback list per source model:
   the native decision is left unchanged. If the inventory cannot be read, the
   plugin does not switch.
 - After a successful takeover, a later qualifying `429` with no remaining
-  candidate stops the retry so OpenCode delivers the terminal child error. The
-  host's own retry budget remains authoritative.
+  candidate stops the retry so OpenCode delivers the terminal child error. Once
+  a confirmed chain is exhausted by its cursor, it stops the retry without
+  reading the model inventory. The host's own retry budget remains
+  authoritative.
 - A successful fallback stays active for later steps in that child. A fresh
   child starts on the configured source, and a follow-up sent to an existing
   child by `sessionID` keeps its stored model. Changing the child's model
@@ -92,11 +99,16 @@ Load the plugin directory and pass an ordered fallback list per source model:
   new selection.
 - At most one routing decision runs per child. An interruption or deletion
   invalidates a pending decision, and plugin unload closes the router before any
-  asynchronous cleanup. An invalidated operation cannot switch a model, publish
-  a retry decision, or update chain state even if its switch request completes
-  later. An interruption preserves an already confirmed chain, but does not
-  retain a chain that never took over. If the host already committed a switch,
-  the plugin does not roll it back.
+  asynchronous cleanup. An invalidated operation cannot publish a retry
+  decision or update chain state even if its switch request completes later.
+  OpenCode 2.3.2 does not cancel an already sent `switchModel` RPC when its
+  `AbortSignal` fires, so the host may still apply that switch. Within one
+  plugin instance, the plugin does not start another switch for the same child
+  while the earlier request is still settling; other children keep routing
+  normally. An interruption preserves an already confirmed chain and clears a
+  pending unconfirmed target, but drops a chain whose switch never
+  demonstrably took over. If the host already committed a switch, the plugin
+  does not roll it back.
 - Routing state is in memory, bounded, and dropped on session deletion and
   plugin unload. A reload does not restore a chain or change a stored model.
 - If the lifecycle event subscription ends unexpectedly or fails, the plugin
@@ -113,7 +125,16 @@ Load the plugin directory and pass an ordered fallback list per source model:
   request on a mapped model can also take over.
 - OpenCode has no atomic selection-and-switch call. The post-switch check
   reduces, but cannot eliminate, the race between a host-side switch and a newer
-  manual selection.
+  manual selection. A manual change that returns to the intended provider,
+  model, and variant between checks is indistinguishable from a confirmed
+  switch. OpenCode 2.3.2 also applies a switch request that was already sent
+  even after its `AbortSignal` fires.
+- Within one plugin instance, at most 512 child chains and 512 in-flight
+  routing operations are retained. An interrupted switch keeps its operation
+  slot until the host RPC settles; an interrupted lookup releases it
+  immediately. When either limit is reached, new children keep the native retry
+  decision until state is released by session deletion, unload, or a finished
+  operation. A chain that never takes over is dropped after the attempt.
 - Cross-provider fallback is supported at the plugin layer, including an
   OpenAI-compatible source falling back to a native Anthropic driver.
 
@@ -150,8 +171,11 @@ bun run plugins/model-fallback/e2e/run.ts
 
 `bun test` runs the colocated unit and plugin-boundary tests and never starts
 OpenCode. The integration runner requires OpenCode `2.3.2` on `PATH`, creates an
-isolated temporary project with local mock providers, and removes it afterwards.
-It covers:
+isolated temporary project with its own `HOME` and XDG directories, and removes
+it afterwards. It inherits no ambient credentials, uses loopback mock providers
+and fake keys only, and checks the mock origin once when building the config.
+An E2E-only model guard then removes every model outside the fixture providers,
+including any implicit auxiliary model. It covers:
 
 - the core same-child retry, including one completed `read`, one subagent
   invocation, one parent report, the original tool result, and an unchanged
@@ -177,7 +201,7 @@ bun pm pack --dry-run
 PACK_DIR=$(mktemp -d)
 bun pm pack --destination "$PACK_DIR"
 cd ../..
-tar -xzf "$PACK_DIR/opencode-model-fallback-1.0.1.tgz" -C "$PACK_DIR"
+tar -xzf "$PACK_DIR/opencode-model-fallback-1.0.2.tgz" -C "$PACK_DIR"
 MODEL_FALLBACK_PLUGIN_DIR="$PACK_DIR/package" \
   bun run plugins/model-fallback/e2e/run.ts core
 rm -rf "$PACK_DIR"

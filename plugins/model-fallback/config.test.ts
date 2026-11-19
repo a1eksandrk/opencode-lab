@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import {
-  formatTarget,
   parseFallbackConfig,
   sourceKey,
   targetKey,
@@ -11,7 +10,7 @@ function targets(config: FallbackConfig): Record<string, string[]> {
   return Object.fromEntries(
     [...config.targetsBySource].map(([key, values]) => [
       key,
-      values.map(formatTarget),
+      values.map(targetKey),
     ]),
   );
 }

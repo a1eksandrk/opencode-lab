@@ -5,24 +5,28 @@ import {
   type FallbackRuntime,
   type FallbackSessionInfo,
 } from "./router";
-import { parseFallbackConfig, type FallbackConfig } from "./config";
-import type { InventoryModel, RuntimeModelRef } from "./candidates";
+import {
+  parseFallbackConfig,
+  type FallbackConfig,
+  type ModelRef,
+} from "./config";
+import type { InventoryModel } from "./candidates";
 
 const CHILD = "ses_child";
 const PARENT = "ses_parent";
 const GRANDCHILD = "ses_grandchild";
 const OTHER = "ses_other";
-const A: RuntimeModelRef = { providerID: "p", id: "a", variant: "default" };
-const B: RuntimeModelRef = { providerID: "p", id: "b", variant: "default" };
-const C: RuntimeModelRef = { providerID: "q", id: "c", variant: "default" };
-const D: RuntimeModelRef = { providerID: "r", id: "d", variant: "default" };
+const A: ModelRef = { providerID: "p", id: "a", variant: "default" };
+const B: ModelRef = { providerID: "p", id: "b", variant: "default" };
+const C: ModelRef = { providerID: "q", id: "c", variant: "default" };
+const D: ModelRef = { providerID: "r", id: "d", variant: "default" };
 
 function config(fallback: Record<string, string[]>): FallbackConfig {
   return parseFallbackConfig({ fallback });
 }
 
 function model(
-  ref: RuntimeModelRef,
+  ref: ModelRef,
   overrides: Partial<InventoryModel> = {},
 ): InventoryModel {
   return {
@@ -56,13 +60,15 @@ interface FakeOptions {
   readonly onListModels?: (call: number) => void;
   readonly onGetSession?: (call: number) => void;
   readonly commitSwitchBeforeGate?: boolean;
+  /** Simulate OpenCode 2.3.2, which applies a sent switch even after abort. */
+  readonly ignoreSwitchAbort?: boolean;
 }
 
 interface FakeRuntime {
   readonly runtime: FallbackRuntime;
   readonly sessions: Map<string, FallbackSessionInfo>;
   readonly calls: {
-    readonly switches: { sessionID: string; model: RuntimeModelRef }[];
+    readonly switches: { sessionID: string; model: ModelRef }[];
     readonly getSession: string[];
     readonly signals: AbortSignal[];
     listModels: number;
@@ -113,7 +119,9 @@ function fakeRuntime(options: FakeOptions = {}): FakeRuntime {
         if (session) sessions.set(sessionID, { ...session, model: next });
       }
       if (gate) await gate;
-      if (signal?.aborted) throw new Error("switch aborted");
+      if (!options.ignoreSwitchAbort && signal?.aborted) {
+        throw new Error("switch aborted");
+      }
 
       if (!options.commitSwitchBeforeGate) {
         const session = sessions.get(sessionID);
@@ -150,7 +158,7 @@ function router(
 }
 
 function retryEvent(
-  modelRef: RuntimeModelRef,
+  modelRef: ModelRef,
   overrides: Partial<FallbackRetryEvent> = {},
 ): FallbackRetryEvent {
   return {
@@ -320,7 +328,7 @@ describe("FallbackRouter candidate selection", () => {
   test("does not inherit the source variant", async () => {
     const fake = fakeRuntime();
     const target = router({ "p/a": ["p/b"] }, fake);
-    const highA: RuntimeModelRef = { ...A, variant: "high" };
+    const highA: ModelRef = { ...A, variant: "high" };
     fake.sessions.set(CHILD, { parentID: PARENT, model: highA });
 
     await target.handleRetry(retryEvent(highA));
@@ -407,6 +415,31 @@ describe("FallbackRouter candidate selection", () => {
     ]);
   });
 
+  test("stops a cursor-exhausted chain without reading the inventory", async () => {
+    const fake = fakeRuntime({ models: [model(B)] });
+    const warnings: string[] = [];
+    const target = router({ "p/a": ["p/b"] }, fake, warnings);
+
+    expect(await target.handleRetry(retryEvent(A))).toEqual({
+      retry: true,
+      delay: 0,
+    });
+
+    let inventoryReads = 0;
+    fake.runtime.listModels = async () => {
+      inventoryReads += 1;
+      throw new Error("inventory unavailable");
+    };
+
+    expect(await target.handleRetry(retryEvent(B))).toEqual({ retry: false });
+    expect(inventoryReads).toBe(0);
+    expect(
+      warnings.some((message) =>
+        message.includes("could not read the model inventory"),
+      ),
+    ).toBe(false);
+  });
+
   test("vetoes a 429 only after an owned chain is exhausted", async () => {
     const fake = fakeRuntime({ models: [model(B)] });
     const target = router({ "p/a": ["p/b"] }, fake);
@@ -465,6 +498,112 @@ describe("FallbackRouter SDK effects", () => {
       delay: 0,
     });
     expect(fake.calls.getSession).toHaveLength(3);
+    expect(fake.calls.switches).toHaveLength(1);
+  });
+
+  test("reconciles an unconfirmed switch instead of discarding the original chain", async () => {
+    const fake = fakeRuntime({
+      models: [model(A), model(B), model(C)],
+      onGetSession: (call) => {
+        if (call === 3) throw new Error("temporary session failure");
+      },
+    });
+    const target = router({ "p/a": ["p/b", "q/c"], "p/b": ["p/a"] }, fake);
+
+    expect(await target.handleRetry(retryEvent(A))).toBeUndefined();
+    expect(fake.calls.switches.map((call) => call.model)).toEqual([
+      { providerID: "p", id: "b" },
+    ]);
+    expect(fake.sessions.get(CHILD)?.model).toEqual({
+      providerID: "p",
+      id: "b",
+    });
+
+    expect(await target.handleRetry(retryEvent(B))).toEqual({
+      retry: true,
+      delay: 0,
+    });
+    expect(fake.calls.switches.map((call) => call.model)).toEqual([
+      { providerID: "p", id: "b" },
+      { providerID: "q", id: "c" },
+    ]);
+  });
+
+  test("preserves an unconfirmed chain through a stale retry", async () => {
+    const fake = fakeRuntime({
+      models: [model(A), model(B), model(C)],
+      onGetSession: (call) => {
+        if (call === 3) throw new Error("temporary session failure");
+      },
+    });
+    const target = router({ "p/a": ["p/b", "q/c"], "p/b": ["p/a"] }, fake);
+
+    expect(await target.handleRetry(retryEvent(A))).toBeUndefined();
+    expect(await target.handleRetry(retryEvent(A))).toBeUndefined();
+    expect(fake.calls.switches).toHaveLength(1);
+
+    expect(await target.handleRetry(retryEvent(B))).toEqual({
+      retry: true,
+      delay: 0,
+    });
+    expect(fake.calls.switches.map((call) => call.model)).toEqual([
+      { providerID: "p", id: "b" },
+      { providerID: "q", id: "c" },
+    ]);
+  });
+
+  test("interrupt keeps the confirmed target and drops only the unconfirmed one", async () => {
+    const fake = fakeRuntime({
+      models: [model(A), model(B), model(C)],
+      onGetSession: (call) => {
+        if (call === 6) throw new Error("temporary session failure");
+      },
+    });
+    const target = router({ "p/a": ["p/b", "q/c"] }, fake);
+
+    expect(await target.handleRetry(retryEvent(A))).toEqual({
+      retry: true,
+      delay: 0,
+    });
+    expect(await target.handleRetry(retryEvent(B))).toBeUndefined();
+    target.interruptSession(CHILD);
+
+    expect(await target.handleRetry(retryEvent(C))).toBeUndefined();
+    expect(fake.calls.switches.map((call) => call.model)).toEqual([
+      { providerID: "p", id: "b" },
+      { providerID: "q", id: "c" },
+    ]);
+  });
+
+  test("drops an unconfirmed chain after an interruption", async () => {
+    const fake = fakeRuntime({
+      models: [model(A), model(B)],
+      onGetSession: (call) => {
+        if (call === 3) throw new Error("temporary session failure");
+      },
+    });
+    const target = router({ "p/a": ["p/b"] }, fake);
+
+    expect(await target.handleRetry(retryEvent(A))).toBeUndefined();
+    target.interruptSession(CHILD);
+
+    expect(await target.handleRetry(retryEvent(B))).toBeUndefined();
+    expect(fake.calls.switches).toHaveLength(1);
+  });
+
+  test("discards an unconfirmed chain when the child shows a manual selection", async () => {
+    const fake = fakeRuntime({
+      models: [model(A), model(B), model(D)],
+      onGetSession: (call) => {
+        if (call === 3) throw new Error("temporary session failure");
+      },
+    });
+    const target = router({ "p/a": ["p/b"] }, fake);
+
+    expect(await target.handleRetry(retryEvent(A))).toBeUndefined();
+    fake.sessions.set(CHILD, { parentID: PARENT, model: D });
+
+    expect(await target.handleRetry(retryEvent(D))).toBeUndefined();
     expect(fake.calls.switches).toHaveLength(1);
   });
 
@@ -557,6 +696,62 @@ describe("FallbackRouter operation lifetime", () => {
     expect(fake.calls.switches).toEqual([
       { sessionID: CHILD, model: { providerID: "p", id: "b" } },
     ]);
+  });
+
+  test("retains interrupted switches, saturates the slot limit, and releases it", async () => {
+    const gates = Array.from({ length: 512 }, () => deferred());
+    const entered = Array.from({ length: 512 }, () => deferred());
+    const warnings: string[] = [];
+    const fake = fakeRuntime({
+      models: [model(B)],
+      switchGates: gates.map((gate) => gate.promise),
+      onSwitch: (call) => entered[call - 1]?.resolve(),
+    });
+    const target = router({ "p/a": ["p/b"] }, fake, warnings);
+    const pending: Array<Promise<unknown>> = [];
+
+    for (let index = 0; index < 512; index += 1) {
+      const sessionID = `ses_hung_${index}`;
+      fake.sessions.set(sessionID, { parentID: PARENT, model: A });
+      pending.push(target.handleRetry(retryEvent(A, { sessionID })));
+      await entered[index]!.promise;
+
+      if (index % 2 === 0) target.interruptSession(sessionID);
+      else target.forgetSession(sessionID);
+    }
+
+    const operations = (
+      target as unknown as {
+        operations: Map<
+          string,
+          { controller: AbortController; phase: "routing" | "switching" }
+        >;
+      }
+    ).operations;
+    expect(operations.size).toBe(512);
+    expect(fake.calls.switches).toHaveLength(512);
+
+    fake.sessions.set(OTHER, { parentID: PARENT, model: A });
+    expect(
+      await target.handleRetry(retryEvent(A, { sessionID: OTHER })),
+    ).toBeUndefined();
+    expect(fake.calls.switches).toHaveLength(512);
+    expect(
+      warnings.some((message) => message.includes("too many operations")),
+    ).toBe(true);
+
+    gates[0]!.resolve();
+    expect(await pending[0]!).toBeUndefined();
+    expect(operations.size).toBe(511);
+
+    expect(
+      await target.handleRetry(retryEvent(A, { sessionID: OTHER })),
+    ).toEqual({ retry: true, delay: 0 });
+    expect(fake.calls.switches).toHaveLength(513);
+
+    for (const gate of gates) gate.resolve();
+    await Promise.all(pending.slice(1));
+    expect(operations.size).toBe(0);
   });
 
   test("does not switch when an interruption lands during inventory lookup", async () => {
@@ -713,7 +908,86 @@ describe("FallbackRouter operation lifetime", () => {
     expect(fake.calls.switches).toHaveLength(1);
   });
 
-  test("keeps the guard of a newer operation when an old switch completes late", async () => {
+  test("does not adopt a switch the host applies after interruption", async () => {
+    const gate = deferred();
+    const entered = deferred();
+    const fake = fakeRuntime({
+      models: [model(B)],
+      switchGates: [gate.promise],
+      ignoreSwitchAbort: true,
+      onSwitch: () => entered.resolve(),
+    });
+    const target = router({ "p/a": ["p/b"] }, fake);
+
+    const pending = target.handleRetry(retryEvent(A));
+    await entered.promise;
+
+    target.interruptSession(CHILD);
+    gate.resolve();
+
+    expect(await pending).toBeUndefined();
+    expect(fake.sessions.get(CHILD)?.model).toEqual({
+      providerID: "p",
+      id: "b",
+    });
+
+    // OpenCode 2.3.2 ignores the aborted signal and applies the late RPC, but
+    // the plugin must not publish a decision or resurrect chain ownership.
+    expect(await target.handleRetry(retryEvent(B))).toBeUndefined();
+    expect(fake.calls.switches).toHaveLength(1);
+  });
+
+  test("does not start another switch while a late one is still settling", async () => {
+    const gate = deferred();
+    const entered = deferred();
+    const warnings: string[] = [];
+    const fake = fakeRuntime({
+      models: [model(B), model(C)],
+      switchGates: [Promise.resolve(), gate.promise],
+      ignoreSwitchAbort: true,
+      onSwitch: (call) => {
+        if (call === 2) entered.resolve();
+      },
+    });
+    const target = router(
+      { "p/a": ["p/b", "q/c"] },
+      fake,
+      warnings,
+    );
+
+    expect(await target.handleRetry(retryEvent(A))).toEqual({
+      retry: true,
+      delay: 0,
+    });
+
+    const late = target.handleRetry(retryEvent(B));
+    await entered.promise;
+
+    target.interruptSession(CHILD);
+    expect(await target.handleRetry(retryEvent(B))).toBeUndefined();
+    expect(fake.calls.switches).toHaveLength(2);
+
+    // The guard is per session: another child can still route normally.
+    fake.sessions.set(OTHER, { parentID: PARENT, model: A });
+    expect(
+      await target.handleRetry(retryEvent(A, { sessionID: OTHER })),
+    ).toEqual({ retry: true, delay: 0 });
+    expect(fake.calls.switches).toHaveLength(3);
+
+    gate.resolve();
+    expect(await late).toBeUndefined();
+    expect(fake.sessions.get(CHILD)?.model).toEqual({
+      providerID: "q",
+      id: "c",
+    });
+    expect(await target.handleRetry(retryEvent(C))).toBeUndefined();
+    expect(fake.calls.switches).toHaveLength(3);
+    expect(
+      warnings.some((message) => message.includes("earlier switch is still settling")),
+    ).toBe(true);
+  });
+
+  test("serializes a late switch before admitting the next decision", async () => {
     const firstGate = deferred();
     const secondGate = deferred();
     const firstEntered = deferred();
@@ -730,16 +1004,18 @@ describe("FallbackRouter operation lifetime", () => {
 
     const first = target.handleRetry(retryEvent(A));
     await firstEntered.promise;
-
     target.forgetSession(CHILD);
 
-    const second = target.handleRetry(retryEvent(A));
-    await secondEntered.promise;
-
+    // The deleted session's switch request is still in flight. A new decision
+    // for the same session must wait rather than race that request.
     expect(await target.handleRetry(retryEvent(A))).toBeUndefined();
 
     firstGate.resolve();
     expect(await first).toBeUndefined();
+
+    const second = target.handleRetry(retryEvent(A));
+    await secondEntered.promise;
+    expect(await target.handleRetry(retryEvent(A))).toBeUndefined();
 
     secondGate.resolve();
     expect(await second).toEqual({ retry: true, delay: 0 });
@@ -836,7 +1112,7 @@ describe("FallbackRouter state and lifecycle", () => {
 
     await target.handleRetry(retryEvent(A));
 
-    const highB: RuntimeModelRef = { ...B, variant: "high" };
+    const highB: ModelRef = { ...B, variant: "high" };
     fake.sessions.set(CHILD, { parentID: PARENT, model: highB });
 
     expect(await target.handleRetry(retryEvent(highB))).toBeUndefined();
@@ -908,11 +1184,17 @@ describe("FallbackRouter state and lifecycle", () => {
     const target = router({ "p/a": ["p/b"] }, fake, warnings);
     const operations = (
       target as unknown as {
-        operations: Map<string, { controller: AbortController }>;
+        operations: Map<
+          string,
+          { controller: AbortController; phase: "routing" | "switching" }
+        >;
       }
     ).operations;
     for (let index = 0; index < 512; index += 1) {
-      operations.set(`ses_op_${index}`, { controller: new AbortController() });
+      operations.set(`ses_op_${index}`, {
+        controller: new AbortController(),
+        phase: "routing",
+      });
     }
 
     expect(await target.handleRetry(retryEvent(A))).toBeUndefined();

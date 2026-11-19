@@ -21,8 +21,7 @@ test("waits for every hook registration and disposes them on cleanup", async () 
   const pending = Promise.resolve(observer.setup(ctx as never));
   expect(await Promise.race([pending.then(() => "settled"), Promise.resolve("pending")])).toBe("pending");
   expect(calls).toEqual([
-    "context:*", "http.request:p", "http.response:p",
-    "http.request:q", "http.response:q", "retry:*", "execute.after:*",
+    "context:*", "http.request:p", "http.request:q", "retry:*", "execute.after:*",
   ]);
 
   release();
@@ -44,5 +43,5 @@ test("propagates registration failures and disposes successful registrations", a
   };
 
   await expect(Promise.resolve(observer.setup(ctx as never))).rejects.toThrow("registration failed");
-  expect(disposed.sort()).toEqual(["context", "execute.after", "http.request", "http.response"]);
+  expect(disposed.sort()).toEqual(["context", "execute.after", "http.request"]);
 });
